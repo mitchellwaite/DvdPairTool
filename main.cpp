@@ -39,6 +39,14 @@ static int __declspec(naked) HvxGetVersions(unsigned int magic, int op,
 // by default but many flavours of RGL do not have this patch
 static void PatchDevkitHypervisor()
 {
+    // Probe the syscall-0 backdoor first (op 1 returns 1 when it's present). If it's missing,
+    // the memcpy below would do nothing or fault, so don't attempt the patch.
+    if (HvxGetVersions(0x72627472, 1, 0, 0, 0) != 1) {
+        dprintf("WARNING: HV syscall backdoor not available; skipping HvxKeysGetKey patch.\n");
+        dprintf("--------------------------------------------------------------\n");
+        return;
+    }
+
     unsigned char* buf = (unsigned char*)XPhysicalAlloc(0x1000, MAXULONG_PTR, 0, PAGE_READWRITE);
     if (!buf) {
         dprintf("WARNING: could not allocate a buffer for the HV patch.\n");
