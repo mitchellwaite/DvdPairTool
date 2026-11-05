@@ -287,7 +287,7 @@ static DVD_DRIVE_FAMILY ClassifyDrive(const DVD_DRIVE_INFO* di)
     //   "SATA    " "DVD-ROM"          rev 6243  (generic SATA fallback)
     //   "HL-DT-ST" "DVD-ROM DL10N"    (Hitachi-LG slim)
     // Note the vendors are distinct: BenQ = "PBDS", Lite-On = "PLDS". DG-16D5S isn't in
-    // either kernel's table. The extra GDR3120L, D4S, D5S and DL10N revisions in
+    // either kernel's table. The extra GDR3120L, BenQ, D2S, D4S, D5S and DL10N revisions in
     // IsKnownFirmware are user-supplied, not from these tables.
 
     // These models can have different controller chips running D2S firmware, so the model
@@ -331,11 +331,11 @@ static int IsKnownFirmware(DVD_DRIVE_FAMILY fam, const char* rev, const char* pr
     static const char* hitachi[] = {"0027","0032","0036","0037","0040","0046","0047","0058",
                                     "0059","0061","0078","0079",0};
     static const char* samsung[] = {"ms25","ms28",0};
-    static const char* d2s[]     = {"7485","8385","9345",0};
+    static const char* d2s[]     = {"7485","8385","9345","0251",0};
     static const char* d4s[]     = {"9504","0225","0272","0401","1071","J504",0};
     static const char* d5s[]     = {"1175","1532",0};
     static const char* dl10n[]   = {"0500","0502",0};
-    static const char* benq[]    = {"6243",0};  // + VAD6038 matched by product
+    static const char* benq[]    = {"6243","0442","0443",0};  // + VAD6038 matched by product
     switch (fam) {
         case DVD_FAMILY_HITACHI:    list = hitachi; break;
         case DVD_FAMILY_SAMSUNG:    list = samsung; break;

@@ -18,10 +18,10 @@ Runs on a devkit/test kit, or on a retail console with a patched hypervisor (RGH
 
 - **A** — pair drive to this console (writes the console's current KeyVault DVD key into the
   drive; KeyVault untouched). On a DG-16D4S, DG-16D5S, DL10N or unrecognized firmware it asks
-  X=OLD / Y=NEW.
+  X=OLD / Y=NEW. Once an attempt has run, the tool only offers "Press A to reboot".
 - **X** — read and print the drive's current key. Not every drive supports this: `0xC0000010`
   means the drive rejected the request, not that it can't be paired.
-- **BACK** — exit (reboot).
+- **BACK** — return to the dashboard (no reboot).
 
 ## Files
 

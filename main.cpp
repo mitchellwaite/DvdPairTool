@@ -60,7 +60,8 @@ static void ReportPairStatus(DVDP_STATUS st)
 }
 
 // Run a pairing attempt; if it defers to the user, let them pick the method.
-static void DoPair()
+// Returns nonzero once an attempt has run (whatever the result), 0 if cancelled.
+static int DoPair()
 {
     dprintf("\nPairing drive to this console (KeyVault key -> drive)...\n");
     DVDP_STATUS st = DvdPair_PairConnectedDrive(DVDP_ODD_AUTO);
@@ -85,12 +86,24 @@ static void DoPair()
                 dprintf("  Trying NEW path...\n");
                 st = DvdPair_PairConnectedDrive(DVDP_ODD_NEW); break;
             }
-            if (b & XINPUT_GAMEPAD_B) { dprintf("  Cancelled.\n"); return; }
+            if (b & XINPUT_GAMEPAD_B) { dprintf("  Cancelled.\n"); WaitAllReleased(); return 0; }
             Sleep(16);
         }
     }
     ReportPairStatus(st);
     WaitAllReleased();
+    return 1;
+}
+
+// After a pairing attempt the only way on is a reboot, so the console picks up the drive.
+static void WaitForRebootPress()
+{
+    dprintf("\nPress A to reboot.\n");
+    for (;;) {
+        if (PollButtons() & XINPUT_GAMEPAD_A)
+            HalReturnToFirmware(HalReturnToFirmwareReboot);
+        Sleep(16);
+    }
 }
 
 static void DoReadKey()
@@ -131,15 +144,20 @@ VOID __cdecl main()
     dprintf("--------------------------------------------------------------\n");
     dprintf("A = Pair drive to this console (KeyVault key -> drive)\n");
     dprintf("X = Read current drive key\n");
-    dprintf("BACK = Exit (reboot)\n");
+    dprintf("BACK = Exit to dashboard\n");
 
     for (;;) {
         WORD b = PollButtons();
-        if (b & XINPUT_GAMEPAD_A)          DoPair();
+        if (b & XINPUT_GAMEPAD_A) {
+            if (DoPair())
+                WaitForRebootPress();
+        }
         else if (b & XINPUT_GAMEPAD_X)     DoReadKey();
-        else if (b & XINPUT_GAMEPAD_BACK)  break;
+        else if (b & XINPUT_GAMEPAD_BACK) {
+            // Nothing has been written from the main menu, so no reboot is needed.
+            XLaunchNewImage(XLAUNCH_KEYWORD_DEFAULT_APP, 0);
+            dprintf("Couldn't return to the dashboard.\n");
+        }
         Sleep(16);
     }
-
-    HalReturnToFirmware(HalReturnToFirmwareReboot);
 }

@@ -103,7 +103,8 @@ a tool is broken.
    NEW. The D5S is no longer refused; a unit with unwritable flash just fails at the write.
    Known revisions (user-supplied unless a kernel/recovery lists them, as for `9504`/`J504`): D4S
    `9504` `0225` `0272` `0401` `1071` `J504`; D5S `1175` `1532`; DL10N `0500` `0502`. A known
-   revision only changes the `Firmware:` line; these models still ask.
+   revision only changes the `Firmware:` line; these models still ask. Other user-supplied
+   revisions: GDR3120L `0027` `0032` `0036` `0037` `0040`, D2S `0251`, BenQ `0442` `0443`.
 6. **Unrecognized firmware is not guessed.** `Odd_DetectDrive` sets `KnownFirmware`; the AUTO
    path returns `DVDP_STATUS_UNKNOWN_FIRMWARE` (writes nothing) so the UI can ask the user to
    pick `DVDP_ODD_OLD` (BB/30 unlock+set) or `DVDP_ODD_NEW` (+ A5/10 authenticate) and re-call
@@ -113,6 +114,10 @@ a tool is broken.
    HV-side, keyed off the XEX's signed system flags (the recovery is "Manufacturing
    Utility/Support Tool"). The tool runs on a devkit/testkit, or on retail with a patched HV
    (RGH/JTAG) that neutralizes those checks. The user runs such a patch.
+8. **Exiting.** BACK on the main menu returns to the dashboard
+   (`XLaunchNewImage(XLAUNCH_KEYWORD_DEFAULT_APP, 0)`, as the NAND flasher does), since nothing
+   has been written. After a pairing attempt runs (success or failure, not a cancel), the only
+   option is "Press A to reboot".
 
 ## Caveats / open items
 
