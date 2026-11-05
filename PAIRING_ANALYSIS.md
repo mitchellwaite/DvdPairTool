@@ -245,7 +245,7 @@ drive-match table stores full 28-char records (vendor 8 + product 16 + revision 
 |---|---|---|---|---|
 | Hitachi-LG | `HL-DT-ST` | `DVD-ROM GDR3120L` | `0046` `0047` `0058` `0059` `0078` `0079`, `0061`, `0027` `0032` `0036` `0037` `0040` | 21256.18 kernel; 11775.3 kernel; last five seen in the wild (user-supplied) |
 | Samsung    | `TSSTcorp` | `DVD-ROM TS-H943A` | `ms25` `ms28` | both kernels |
-| BenQ       | `PBDS␣␣␣␣` | `VAD6038-64930C␣␣` | (none); `0442` `0443` also accepted | 21256.18 kernel; revisions user-supplied |
+| BenQ       | `PBDS␣␣␣␣` | `VAD6038-64930C␣␣` | (none); `6493` `0442` `0443` also accepted | 21256.18 kernel; revisions user-supplied |
 | Lite-On D2S| `PLDS␣␣␣␣` | `DG-16D2S␣␣␣␣␣␣␣␣` | `7485` `8385` `9345`, `0251` | both kernels; `0251` user-supplied |
 | Lite-On D4S| `PLDS␣␣␣␣` | `DG-16D4S␣␣␣␣␣␣␣␣` | `9504`, `J504`, `0225` `0272` `0401` `1071` | 21256.18 kernel + 11775.3 recovery; last four user-supplied |
 | Lite-On D5S| — | `DG-16D5S` | `1175` `1532` | user-supplied; not in the kernels |

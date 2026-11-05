@@ -335,7 +335,7 @@ static int IsKnownFirmware(DVD_DRIVE_FAMILY fam, const char* rev, const char* pr
     static const char* d4s[]     = {"9504","0225","0272","0401","1071","J504",0};
     static const char* d5s[]     = {"1175","1532",0};
     static const char* dl10n[]   = {"0500","0502",0};
-    static const char* benq[]    = {"6243","0442","0443",0};  // + VAD6038 matched by product
+    static const char* benq[]    = {"6243","6493","0442","0443",0};  // + VAD6038 matched by product
     switch (fam) {
         case DVD_FAMILY_HITACHI:    list = hitachi; break;
         case DVD_FAMILY_SAMSUNG:    list = samsung; break;

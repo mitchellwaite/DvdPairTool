@@ -1,18 +1,14 @@
 # DVD Drive Pairing Tool
 
-A text-mode Xbox 360 app (ATG console sample style, like the Simple 360 NAND Flasher) that pairs
-a DVD drive to the console, so drives can be swapped between consoles without reinstalling the OS
-or reflashing. It reproduces the pairing step of the 11775.3 recovery; see
-[PAIRING_ANALYSIS.md](PAIRING_ANALYSIS.md) for how that works.
+A text-mode Xbox 360 app that pairs a DVD drive to the console, so drives can be swapped between consoles without reinstalling the OS or reflashing. 
 
-**Pairing has worked on a Lite-On drive; other drives are untested.** **An earlier build bricked a Hitachi GDR3120L** (the
-key write timed out after the unlock); the current build hasn't been tried on a Hitachi, so treat
-Hitachi drives as risky.
+> [!WARNING]
+> This has been tested on a console with MTK based drives (Samsung, BenQ, LiteOn). GDR-3120L
+> hasn't been verified and these drives hard brick easily.
 
-Pairing needs a hypervisor patch that lets a title read the console's DVD key: a stock hypervisor
-refuses (`0xC8000002`). The tool only reads the console's KeyVault; it never changes it.
+**This only works on consoles with a patched hypervisor that allows access to the DVD key**. A stock hypervisor refuses to hand out the key (`0xC8000002`).
 
-Runs on a devkit/test kit, or on a retail console with a patched hypervisor (RGH/JTAG).
+This tool does not change the DVD key, it will only read it from the Keyvault and push it to the DVD drive.
 
 ## Controls
 
@@ -23,53 +19,28 @@ Runs on a devkit/test kit, or on a retail console with a patched hypervisor (RGH
   means the drive rejected the request, not that it can't be paired.
 - **BACK** — return to the dashboard (no reboot).
 
-## Files
+## Supported drives
 
-- `main.cpp` — console UI (detect drive, pair, read key).
-- `DvdPair.cpp/.h` — the pairing logic.
-- `OutputConsole.cpp/.h` — thin wrapper over `ATG::Console` (`dprintf`).
-- `atg/Common/` — ATG framework (headers, sources, `Release_LTCG/AtgFramework.lib`); only the
-  three changed files are tracked.
-- `AtgFramework-installer.bat` — copies missing ATG files from the SDK and builds the lib.
-- `tools/XexTool.exe` — vendored xorloser XexTool.
-- `font.xpr` — console font, **embedded into the XEX**, not shipped separately.
-- `xex.xml` — XEX privileges + compression config for `imagexex`.
-- `build.bat` — the build.
+| Manufacturer | Model | Firmware revisions | Pairing path |
+|---|---|---|---|
+| Hitachi-LG | GDR3120L | `0027` `0032` `0036` `0037` `0040` `0046` `0047` `0058` `0059` `0061` `0078` `0079` | OLD (not verified, see warning) |
+| Hitachi-LG | DL10N | `0500` `0502` | Asks: OLD or NEW |
+| Samsung | TS-H943A | `ms25` `ms28` | OLD |
+| BenQ | VAD6038 | `6243` `6493` `0442` `0443` | OLD (every revision) |
+| Lite-On | DG-16D2S | `7485` `8385` `9345` `0251` | OLD |
+| Lite-On | DG-16D4S | `9504` `0225` `0272` `0401` `1071` `J504` | Asks: OLD or NEW |
+| Lite-On | DG-16D5S | `1175` `1532` | Asks: OLD or NEW |
 
-## Building
+- **OLD** is `BB/30` unlock + set key. **NEW** adds an `A5/10` authenticate with the same key.
+- A revision that isn't listed is reported as `UNRECOGNIZED`, and the tool asks for OLD or NEW
+  instead of guessing.
 
-You need the Xbox 360 SDK (XDK) and the ATG framework; no Visual Studio is needed. `build.bat`
-uses `%XEDK%` or defaults to the SDK's standard install location. Override `%ATG_DIR%`
-(must have `Common\*.h` + `Common\Release_LTCG\AtgFramework.lib`) or `%XEXTOOL%` to use your own
-copies.
+## TODO
 
-Run `AtgFramework-installer.bat` once before the first build. It copies the ATG sources from the
-SDK and builds `AtgFramework.lib`. The repo only tracks the three ATG files this tool needs
-changed (`AtgConsole.cpp`, `AtgConsole.h` and `AtgResource.cpp`, from the Simple 360 NAND
-Flasher), and the installer never overwrites existing files. To rebuild the lib, delete it and
-run the installer again.
+RGLoader may be unsupported since it is missing the patch to de-restrict HvxKeysGetKey. A future update of JRunner will add this patch. A future version of this tool may add a manual HV patch step at startup for 17489 dev kernel.
 
-```
-build.bat
-```
+## Notes
 
-This is a debug build: our code is unoptimized, with symbols in `bin\PairDvd.pdb`. ATG and the
-SDK libraries stay release. Use `build.bat release` for an optimized build without symbols.
+- This reproduces the pairing step of the 11775.3 recovery; see [PAIRING_ANALYSIS.md](PAIRING_ANALYSIS.md) for how that works.
+- See [HITACHI.md](HITACHI.md) for notes on the GDR-3120L.
 
-Steps: `cl` compile -> `link /XEX:NO` -> `imagexex /section:font=font.xpr,RO`
-(`PairDvd_img.xex`) -> `XexTool -r a -m d -e u -c u` -> **`bin\PairDvd.xex`**.
-
-The final XEX is **devkit, unencrypted, uncompressed, with all restrictions removed**
-(media/region/bounding path/console-id/dates/keyvault-privilege/signed-keyvault/library-
-version/revocation/media-id). Copy it to the console and launch it by path; the console only
-auto-launches files named `default.xex`.
-
-## How the font is embedded
-
-Same as the Simple 360 NAND Flasher: `imagexex /section:font=font.xpr,RO` embeds `font.xpr` as a
-XEX resource, and `AtgResource`'s `embed:\font` loads it with `XGetModuleSection(module, "font")`.
-The link step must use `/XEX:NO`; otherwise `link` outputs a finished XEX as the `.exe` and
-`imagexex` ignores `/section`.
-
-To check a build, `XexTool -l bin\PairDvd.xex` should list `font` under Resources, and
-`XexTool -d <dir> bin\PairDvd.xex` should dump a file identical to `font.xpr`.

@@ -57,7 +57,7 @@ typedef enum {
     // Identifiers verified against this build's kernel SataCdRom driver unless noted.
     DVD_FAMILY_SAMSUNG,         // vendor "TSSTcorp", product "DVD-ROM TS-H943A", fw ms25/ms28
     DVD_FAMILY_HITACHI,         // vendor "HL-DT-ST", product "DVD-ROM GDR3120L", 12 known fw revs
-    DVD_FAMILY_BENQ,            // "PBDS    "/"VAD6038-64930C"; fw-6243 units report "SATA"/"DVD-ROM"; fw 6243/0442/0443
+    DVD_FAMILY_BENQ,            // "PBDS    "/"VAD6038-64930C"; fw-6243 units report "SATA"/"DVD-ROM"; fw 6243/6493/0442/0443
     DVD_FAMILY_LITEON_D2S,      // vendor "PLDS    ", product "DG-16D2S", fw 7485/8385/9345/0251
     DVD_FAMILY_LITEON_D4S,      // vendor "PLDS    ", product "DG-16D4S", fw 9504/0225/0272/0401/1071/J504
     DVD_FAMILY_LITEON_D5S,      // product "DG-16D5S", fw 1175/1532; not in the kernel tables

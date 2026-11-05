@@ -104,7 +104,9 @@ a tool is broken.
    Known revisions (user-supplied unless a kernel/recovery lists them, as for `9504`/`J504`): D4S
    `9504` `0225` `0272` `0401` `1071` `J504`; D5S `1175` `1532`; DL10N `0500` `0502`. A known
    revision only changes the `Firmware:` line; these models still ask. Other user-supplied
-   revisions: GDR3120L `0027` `0032` `0036` `0037` `0040`, D2S `0251`, BenQ `0442` `0443`.
+   revisions: GDR3120L `0027` `0032` `0036` `0037` `0040`, D2S `0251`, BenQ `6493` (common) `0442` `0443`. Every VAD6038 revision uses the OLD path
+   (user-confirmed), so a `VAD6038` product string stays known-good on any revision; only the
+   D4S/D5S/DL10N can need either path, depending on the drive's controller.
 6. **Unrecognized firmware is not guessed.** `Odd_DetectDrive` sets `KnownFirmware`; the AUTO
    path returns `DVDP_STATUS_UNKNOWN_FIRMWARE` (writes nothing) so the UI can ask the user to
    pick `DVDP_ODD_OLD` (BB/30 unlock+set) or `DVDP_ODD_NEW` (+ A5/10 authenticate) and re-call
@@ -129,7 +131,9 @@ a tool is broken.
   - **Hitachi GDR3120L rev `0047`: bricked.** Before the sense buffer was added, the unlock
     (`BB/30` + 16×`FF`) succeeded, then the set-key write timed out ("SATA: command timed out",
     "reset timed out", `0xC000016B`), and the drive was left unusable. It isn't known whether the
-    sense buffer fixes Hitachi drives; treat Hitachi pairing as untested and risky.
+    sense buffer fixes Hitachi drives; treat Hitachi pairing as untested and risky. Findings and
+    a potential fix (a ready wait before each key write) are in `HITACHI.md`; the user asked for
+    it to stay unimplemented until they can test with spare drives.
 - **Debug builds trace each step** (`DVDP_TRACE_ENABLED`, set by `build.bat` in debug): device
   open, every SCSI CDB and status, kernel version, and key properties/read status. Use that output
   instead of guessing which call failed. Key bytes are never printed.
