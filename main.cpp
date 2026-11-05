@@ -17,21 +17,53 @@
 extern "C" VOID HalReturnToFirmware(DWORD mode);
 #define HalReturnToFirmwareReboot 1
 
-// Kernel version export (same layout and check as UsbdSecPatch).
+// Kernel version export
 struct KRNL_VERSION { WORD Major, Minor, Build, Qfe; };
 extern "C" __declspec(dllimport) KRNL_VERSION XboxKrnlVersion;
+extern "C" DWORD MmGetPhysicalAddress(void* buffer);
 
-// This dword is zero on a devkit kernel (the check UsbdSecPatch uses).
-#define DEVKIT_CHECK_ADDRESS   0x8010D334
-#define MIN_DEVKIT_KERNEL      17489
-
-static void WarnIfUnsupportedKernel()
+// freeboot/RGL syscall 0 backdoor
+static int __declspec(naked) HvxGetVersions(unsigned int magic, int op,
+                                            unsigned long long source,
+                                            unsigned long long dest,
+                                            unsigned long long length)
 {
-    BOOL isDevkit = *(volatile DWORD*)DEVKIT_CHECK_ADDRESS == 0;
-    if (isDevkit && XboxKrnlVersion.Build < MIN_DEVKIT_KERNEL) {
+    __asm {
+        li r0, 0
+        sc
+        blr
+    }
+}
+
+// Patch HvxKeysGetKey to allow read access to all keyvault keys. This is present on FreeBoot
+// by default but many flavours of RGL do not have this patch
+static void PatchDevkitHypervisor()
+{
+    unsigned char* buf = (unsigned char*)XPhysicalAlloc(0x1000, MAXULONG_PTR, 0, PAGE_READWRITE);
+    if (!buf) {
+        dprintf("WARNING: could not allocate a buffer for the HV patch.\n");
+        return;
+    }
+    unsigned long long bufPhys = 0x8000000000000000ULL + (unsigned int)MmGetPhysicalAddress(buf);
+    *(unsigned int*)buf = 0x48000030;    // ppc: b +0x30
+    HvxGetVersions(0x72627472, 5, bufPhys, 0x8000010000000000ULL + 0x7DD4, 4);
+    XPhysicalFree(buf);
+    dprintf("Successfully applied HvxKeysGetKey patch\n");
+    dprintf("--------------------------------------------------------------\n");
+}
+
+static void CheckKernel()
+{
+    // This dword is zero on a devkit kernel
+    BOOL isDevkit = *(volatile DWORD*)0x8010D334 == 0;
+    if (!isDevkit)
+        return;
+    if (XboxKrnlVersion.Build < 17489) {
         dprintf("WARNING: devkit kernel %u is older than %u; this tool may not be supported.\n",
-                XboxKrnlVersion.Build, MIN_DEVKIT_KERNEL);
+                XboxKrnlVersion.Build, 17489);
         dprintf("--------------------------------------------------------------\n");
+    } else {
+        PatchDevkitHypervisor();
     }
 }
 
@@ -161,7 +193,7 @@ VOID __cdecl main()
 
     dprintf("Xbox 360 DVD Drive Pairing Tool\n");
     dprintf("--------------------------------------------------------------\n");
-    WarnIfUnsupportedKernel();
+    CheckKernel();
     ShowDrive();
     dprintf("--------------------------------------------------------------\n");
     dprintf("A = Pair drive to this console (KeyVault key -> drive)\n");
