@@ -22,6 +22,18 @@ struct KRNL_VERSION { WORD Major, Minor, Build, Qfe; };
 extern "C" __declspec(dllimport) KRNL_VERSION XboxKrnlVersion;
 extern "C" DWORD MmGetPhysicalAddress(void* buffer);
 
+typedef struct _XBOX_HARDWARE_INFO {
+	DWORD Flags;
+	unsigned char NumberOfProcessors;
+	unsigned char PCIBridgeRevisionID;
+	unsigned char Reserved[6];
+	unsigned short BldrMagic;
+	unsigned short BldrFlags;
+} XBOX_HARDWARE_INFO;
+
+extern "C" __declspec(dllimport) XBOX_HARDWARE_INFO XboxHardwareInfo;
+#define XBOX_HARDWARE_FLAG_NOT_RETAIL   (1 << 4)   // set on devkit/test kernels
+
 // freeboot/RGL syscall 0 backdoor
 static int __declspec(naked) HvxGetVersions(unsigned int magic, int op,
                                             unsigned long long source,
@@ -62,8 +74,7 @@ static void PatchDevkitHypervisor()
 
 static void CheckKernel()
 {
-    // This dword is zero on a devkit kernel
-    BOOL isDevkit = *(volatile DWORD*)0x8010D334 == 0;
+    BOOL isDevkit = (XboxHardwareInfo.Flags & XBOX_HARDWARE_FLAG_NOT_RETAIL) != 0;
     if (!isDevkit)
         return;
     if (XboxKrnlVersion.Build < 17489) {
