@@ -36,10 +36,6 @@ This tool does not change the DVD key, it will only read it from the Keyvault an
 - A revision that isn't listed is reported as `UNRECOGNIZED`, and the tool asks for OLD or NEW
   instead of guessing.
 
-## TODO
-
-RGLoader may be unsupported since it is missing the patch to de-restrict HvxKeysGetKey. A future update of JRunner will add this patch. A future version of this tool may add a manual HV patch step at startup for 17489 dev kernel.
-
 ## Notes
 
 - This reproduces the pairing step of the 11775.3 recovery; see [PAIRING_ANALYSIS.md](PAIRING_ANALYSIS.md) for how that works.
