@@ -130,10 +130,11 @@ a tool is broken.
     recovery's old-console sender `sub_92089430` does).
   - **Hitachi GDR3120L rev `0047`: bricked.** Before the sense buffer was added, the unlock
     (`BB/30` + 16×`FF`) succeeded, then the set-key write timed out ("SATA: command timed out",
-    "reset timed out", `0xC000016B`), and the drive was left unusable. It isn't known whether the
-    sense buffer fixes Hitachi drives; treat Hitachi pairing as untested and risky. Findings and
-    a potential fix (a ready wait before each key write) are in `HITACHI.md`; the user asked for
-    it to stay unimplemented until they can test with spare drives.
+    "reset timed out", `0xC000016B`), and the drive was left unusable.
+  - **Hitachi GDR3120L with the current build: pairing worked** on a number of drives, so the
+    later fixes (most likely the sense buffer) resolved the brick. Docs say "tested, but use
+    caution" for these drives. The ready-wait idea in `HITACHI.md` was never needed or
+    implemented.
 - **Debug builds trace each step** (`DVDP_TRACE_ENABLED`, set by `build.bat` in debug): device
   open, every SCSI CDB and status, kernel version, and key properties/read status. Use that output
   instead of guessing which call failed. Key bytes are never printed.

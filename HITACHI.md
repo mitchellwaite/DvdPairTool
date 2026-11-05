@@ -1,7 +1,9 @@
-# Hitachi-LG GDR3120L: notes and a potential fix
+# Hitachi-LG GDR3120L: notes
 
-Status: **not fixed, not tested.** Nothing below has been implemented. Treat Hitachi pairing as
-risky until it's tested on drives that can be lost.
+Status: **tested, but use caution.** The current build has paired a number of GDR3120L drives
+(user-reported), so whatever caused the brick below was resolved by the later fixes, most likely
+the 18-byte sense buffer. The ready wait described below was never needed or implemented; it's
+kept here in case a drive ever hangs again.
 
 ## What happened
 
@@ -16,7 +18,7 @@ SATA: reset timed out.
 ```
 
 The unlock succeeded, the set-key write timed out, and the drive was left unusable. The current
-build has paired a Lite-On drive successfully but hasn't been tried on a Hitachi.
+build has since paired Lite-On drives and a number of GDR3120L drives without this problem.
 
 ## What the binaries show
 
@@ -37,7 +39,7 @@ build has paired a Lite-On drive successfully but hasn't been tried on a Hitachi
   XGD3 disc (`SataCdRomXGD2AuthenticationSequence` → `SataCdRomActivateHCDFRuntimePatch`), using
   Hitachi vendor commands (`E7` read/write, enable flash exe, jump to RAM).
 
-## Potential fix (not implemented)
+## Fallback if a drive ever hangs (not implemented)
 
 A similar hang was seen with libxenon, where an extra wait for the drive to be ready before
 sending a command avoided it. Neither the recovery nor the kernel waits between unlock and set-key,
@@ -60,14 +62,14 @@ If an XGD3 disc had been authenticated in that drive during the same session, th
 been running the kernel's HCDF patch code ("jump to RAM") when the key write arrived. Testing with
 no disc in the drive would rule this out.
 
-## Test plan
+## Testing
 
-Use Hitachi drives that can be lost, with a debug build so the trace is on:
+The current build, unchanged, was tested on a number of GDR3120L drives and paired them without
+hanging (user-reported), so step 1 of the fallback was never needed. If a drive does hang:
 
 1. **No disc in the drive**, console fully powered off and on before each attempt.
-2. **Current build first, unchanged** (it has the sense buffer), to see whether that alone avoids
-   the hang. Record every `SCSI CDB` and `sense` line.
-3. **If it still times out**, add the ready wait above and retry on another drive.
+2. Use a debug build and record every `SCSI CDB` and `sense` line.
+3. **If it still times out**, try the ready wait above on a drive that can be lost.
 4. **Confirm pairing** by rebooting and reading a disc, since GDR3120L firmware rejects the key
    read (MODE SENSE page `0x25`).
 5. Note the revision of every drive tested, and whether it survived.

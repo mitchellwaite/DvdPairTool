@@ -3,8 +3,9 @@
 A text-mode Xbox 360 app that pairs a DVD drive to the console, so drives can be swapped between consoles without reinstalling the OS or reflashing. 
 
 > [!WARNING]
-> This has been tested on a console with MTK based drives (Samsung, BenQ, LiteOn). GDR-3120L
-> hasn't been verified and these drives hard brick easily.
+> This has been tested on a console with MTK based drives (Samsung, BenQ, LiteOn) and on
+> Hitachi GDR-3120L drives. The GDR-3120L has been tested, but use caution: these drives hard
+> brick easily.
 
 **This only works on consoles with a patched hypervisor that allows access to the DVD key**. A stock hypervisor refuses to hand out the key (`0xC8000002`).
 
@@ -23,7 +24,7 @@ This tool does not change the DVD key, it will only read it from the Keyvault an
 
 | Manufacturer | Model | Firmware revisions | Pairing path |
 |---|---|---|---|
-| Hitachi-LG | GDR3120L | `0027` `0032` `0036` `0037` `0040` `0046` `0047` `0058` `0059` `0061` `0078` `0079` | OLD (not verified, see warning) |
+| Hitachi-LG | GDR3120L | `0027` `0032` `0036` `0037` `0040` `0046` `0047` `0058` `0059` `0061` `0078` `0079` | OLD (tested, but use caution) |
 | Hitachi-LG | DL10N | `0500` `0502` | Asks: OLD or NEW |
 | Samsung | TS-H943A | `ms25` `ms28` | OLD |
 | BenQ | VAD6038 | `6243` `6493` `0442` `0443` | OLD (every revision) |
