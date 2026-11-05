@@ -9,9 +9,9 @@ it just writes one key to two places:
 
 1. **Console side** — the DVD key is **KeyVault key index `0x1A`** (16 bytes). The recovery
    calls `XeKeysSetKey(0x1A, key, 16)` and then `XeKeysSaveKeyVault`.
-2. **Drive side** — it opens `\Device\CdRom0` and sends the drive a **vendor command**
-   (`NtDeviceIoControlFile`, IOCTL `0x0004D014`) that unlocks and writes the same key into
-   the drive.
+2. **Drive side** — it opens `\Device\CdRom0` and sends the drive **vendor mode pages** with
+   SCSI MODE SELECT (`NtDeviceIoControlFile`, IOCTL `0x0004D014`, the SCSI pass-through) that
+   unlock and write the same key into the drive.
 
 After both halves hold the same key, the drive and console authenticate and the console
 will talk to the drive. That is the whole of "pairing" — no firmware re-flash.
@@ -70,7 +70,7 @@ Runs a sequence of steps, each gated by a bit in a flags word. The DVD‑relevan
 ("Resetting ODD key"):
 
 ```
-key = <16 random bytes>; validate; retry until valid     ; XeKeysGenerateRandomKey + check
+key = <16 random bytes>; retry if reserved (sub_92088FD8) ; all 00, all FF, 00 11 .. EE FA
 XeKeysSetKey(0x1A, key, 16)                               ; "set DVD Key in KeyVault"
   -> on failure: print "Failed to set DVD Key in KeyVault"
 write key into the drive  (sub_920894C8 or sub_92089088)  ; "set DVD Key in the ODD"
@@ -95,49 +95,59 @@ int XeKeysSaveKeyVault(...);
 
 All drive traffic goes to **`\Device\CdRom0`** opened with `NtOpenFile`
 (`DesiredAccess=0x80100000`, `ShareAccess=1`, `OpenOptions=0x20`), then
-`NtDeviceIoControlFile` with **IOCTL `0x0004D014`**.
+`NtDeviceIoControlFile` with **IOCTL `0x0004D014`**, the kernel's SCSI pass-through
+(`SataCdRomStartScsiPassThrough` hands `+0x14`, `+0x10`, `+0x08` and `+0x07` to
+`SataCdRomIssueAtapiRequest`).
 
-The low‑level senders are `sub_920D7A40` (command→drive) and `sub_920D7AC8`
-(command + read←drive). Both build a **36‑byte request** that points at a **command block**:
+The low‑level senders are `sub_920D7A40` (MODE SELECT) and `sub_920D7AC8` (MODE SENSE);
+`sub_920D7CA8` sends INQUIRY. The kernel's own `SataCdRomSendAP20Sense` / `Select` and
+`SataCdRomInitialize` build the same request.
 
 ### IOCTL `0x4D014` request structure (36 bytes)
 
 | Off | Type | Value / meaning |
 |----:|------|-----------------|
 | 0x00 | u16 | `0x0024` (= 36, size of this request) |
-| 0x02 | u16 | 0 |
-| 0x04 | u32 | 0 |
 | 0x07 | u8  | direction: `0` = data **to** drive, `1` = data **from** drive |
-| 0x08 | u32 | transfer length = `commandBlock.size + 2` |
-| 0x0C | u32 | 0 |
-| 0x10 | u32 | pointer to the **command block** (below) |
-| 0x14 | u8  | `0x55` ('U') — signature/flag |
-| 0x1B | u16 | `commandBlock.size + 2` (copy) |
-| 0x20 | u32 | 0 |
+| 0x08 | u32 | data length (the kernel rejects odd values and anything over `0x20000`) |
+| 0x10 | u32 | data buffer (the kernel rejects odd addresses) |
+| 0x14 | 16 bytes | **SCSI CDB** |
 
-(Bytes not listed are zero. Offsets 0x02–0x06/0x0C/0x20 observed constant‑zero.)
+(Bytes not listed are zero.)
 
-### Command block
+### SCSI commands
+
+| CDB | Dir | Data | Purpose |
+|-----|:---:|------|---------|
+| `12 00 00 00 24 C0` | from drive | 36 bytes | INQUIRY |
+| `55 00 00 00 00 00 00 LL LL` | to drive | mode parameter list | MODE SELECT(10), `LLLL` = data length |
+| `5A 00 PP 00 00 00 00 LL LL` | from drive | mode parameter list | MODE SENSE(10), `PP` = page code |
+
+### Mode parameter list
 
 | Off | Type | Meaning |
 |----:|------|---------|
-| 0x00 | u16 | total size of the block (`56` for BB/30, `24` for A5/10) |
-| 0x02..0x07 | — | reserved (0) |
-| 0x08 | u8  | **opcode** |
-| 0x09 | u8  | **modifier / sub‑command** |
-| 0x0A.. | bytes | payload (e.g. the 16‑byte key) |
+| 0x00 | u16 | mode data length, excluding this field (`56` or `24`); data length = this + 2 |
+| 0x02..0x07 | — | rest of the mode header (0) |
+| 0x08 | u8  | **page code** |
+| 0x09 | u8  | **page length** |
+| 0x0A.. | bytes | page data (e.g. the 16‑byte key, zero-padded) |
 
-### Vendor commands used for pairing
+### Vendor mode pages used for pairing
 
-| Opcode | Mod | Dir | Payload | Purpose |
-|:------:|:---:|:---:|---------|---------|
-| `0xBB` | `0x30` | to drive | 16 × `0xFF` | **unlock** the drive's key slot |
-| `0xBB` | `0x30` | to drive | 16‑byte key | **set DVD key** in the drive |
-| `0xA5` | `0x10` | to drive | 16‑byte key | authenticate with a key |
-| `0x25` | — | from drive | reads 16 bytes | read drive's current key / identity |
+| Page | Length | Command | Data | Purpose |
+|:----:|:-----:|---------|------|---------|
+| `0xBB` | `0x30` | MODE SELECT | 16 × `0xFF` | **unlock** the drive's key slot |
+| `0xBB` | `0x30` | MODE SELECT | 16‑byte key | **set DVD key** in the drive |
+| `0xA5` | `0x10` | MODE SELECT | 16‑byte key | authenticate with a key |
+| `0x25` | — | MODE SENSE | reads 16 bytes | read drive's current key / identity |
 
-> Note: the top 2 bits of the opcode byte are flag bits (`opcode & 0x40` is preserved,
-> read path ORs `0xC0`). For the pairing commands above use the opcodes verbatim.
+> Note: in a MODE SELECT page code byte, `0x80` is the PS bit, so `0xBB` and `0xA5` are pages
+> `0x3B` and `0x25` with it set. Use the values above verbatim.
+
+> Reading page `0x25` isn't universal. The recovery only reads it in its DG-16D4S branch, and a
+> drive tested with this tool rejected it with `0xC0000010` (sense key `5`, additional code
+> `0x24`: invalid field in CDB). Which firmware revisions support it isn't known yet.
 
 ## "Old vs new" — what the recovery actually branches on
 
@@ -182,12 +192,12 @@ entries**, both Lite-On DG-16D4S:
 if (drive is NOT a DG-16D4S J504/9504)
      BB/30 unlock+set   (same as everything else)
 else { // DG-16D4S
-     cur = read drive key (vendor 0x25);
-     if (cur == {16x 0xFF})             // blank / factory drive
+     cur = read drive key (mode page 0x25);
+     if (cur == {16x 0xFF}) {           // blank / factory drive
           BB/30 set  key = CONST_A;     // CONST_A/B are FIXED test constants, below
           A5/10 authenticate CONST_B;
-     else                               // drive already keyed
-          XeKeysSetKey(0x1A, CONST_A);  // only sync the KeyVault, don't rewrite drive
+     }
+     XeKeysSetKey(0x1A, CONST_A);       // both cases: sync the KeyVault
 }
 ```
 
@@ -211,13 +221,13 @@ byte_92017040 +0x00: FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF  (blank mar
   board, so the recovery uses `sub_920894C8` (plain `BB/30`) for *every* drive, including a
   DG-16D4S. The special D4S flow above only runs on newer boards.
 - **Coverage limit:** this 2010 recovery predates the Lite-On **DG-16D5S** (slim). There is no
-  table entry for it and no handling; D5S key/unlock is a different, harder process this SDK
-  does not implement. So "all drives" realistically means everything up to and including
-  DG-16D4S.
+  table entry for it and no handling, so nothing here shows that either method works on one.
+  The D4S, D5S and Hitachi **DL10N** (slim) can have different controller chips running D2S
+  firmware (user-reported), so the tool asks which method to use for those models.
 
 So: to pair any drive to your Falcon test kit, the plain `BB/30` unlock+set (what
-`sub_920894C8` does) is the correct, universal path. The code exposes INQUIRY detection too,
-so the tool can name the drive and warn on the D4S/D5S edge cases.
+`sub_920894C8` does) is what the recovery uses. The code exposes INQUIRY detection too, so the
+tool can name the drive and ask about the D4S/D5S/DL10N edge cases.
 
 ### Drive INQUIRY strings the kernel recognises
 
@@ -233,46 +243,51 @@ drive-match table stores full 28-char records (vendor 8 + product 16 + revision 
 
 | Family | INQUIRY vendor (8) | INQUIRY product (16) | Revisions | Source |
 |---|---|---|---|---|
-| Hitachi-LG | `HL-DT-ST` | `DVD-ROM GDR3120L` | `0046` `0047` `0058` `0059` `0078` `0079` | 21256.18 kernel |
+| Hitachi-LG | `HL-DT-ST` | `DVD-ROM GDR3120L` | `0046` `0047` `0058` `0059` `0078` `0079`, `0061`, `0027` `0032` `0036` `0037` `0040` | 21256.18 kernel; 11775.3 kernel; last five seen in the wild (user-supplied) |
 | Samsung    | `TSSTcorp` | `DVD-ROM TS-H943A` | `ms25` `ms28` | both kernels |
 | BenQ       | `PBDS␣␣␣␣` | `VAD6038-64930C␣␣` | (none) | 21256.18 kernel |
 | Lite-On D2S| `PLDS␣␣␣␣` | `DG-16D2S␣␣␣␣␣␣␣␣` | `7485` `8385` `9345` | both kernels |
-| Lite-On D4S| `PLDS␣␣␣␣` | `DG-16D4S␣␣␣␣␣␣␣␣` | `9504`, `J504` | 21256.18 kernel + 11775.3 recovery |
+| Lite-On D4S| `PLDS␣␣␣␣` | `DG-16D4S␣␣␣␣␣␣␣␣` | `9504`, `J504`, `0225` `0272` `0401` `1071` | 21256.18 kernel + 11775.3 recovery; last four user-supplied |
+| Lite-On D5S| — | `DG-16D5S` | `1175` `1532` | user-supplied; not in the kernels |
 | BenQ (6243)| `SATA␣␣␣␣` | `DVD-ROM␣␣␣␣␣␣␣␣␣` | `6243` | 21256.18 kernel — confirmed on HW |
+| Hitachi-LG slim | `HL-DT-ST` | `DVD-ROM DL10N␣␣␣` | `0500` `0502` | names from 21256.18 kernel strings; revisions user-supplied |
 
 Vendor fields are fixed 8 bytes, space-padded. **BenQ and Lite-On are different vendors:
 `PBDS` vs `PLDS`.** Hitachi/Samsung carry the `DVD-ROM ` prefix in the product field; Lite-On
 and BenQ put the model there directly.
 
-**DG-16D5S is deliberately excluded** — its flash chip isn't writable, so the DVD key can't be
-set in the drive at all; detection would only ever report "can't pair."
+**DG-16D5S isn't in either kernel's table.** The tool matches it by product string alone. A unit
+with an unwritable flash chip will fail at the key write.
 
-### Unrecognized firmware → you choose the method
+### D4S, D5S, DL10N and unrecognized firmware → you choose the method
 
-`Odd_DetectDrive` also sets `KnownFirmware` (1 if the revision is in the known-good list for
-that family — the unions above). When the firmware revision is **not** recognized,
-`DvdPair_PairConnectedDrive` (AUTO) does **nothing** and returns
+`Odd_DetectDrive` sets `AskMethod` for a DG-16D4S, DG-16D5S or DL10N, and `KnownFirmware` (1 if
+the revision is in the known-good list for that family — the unions above). For those models
+on any console, or when the firmware revision is **not** recognized,
+`DvdPair_PairConnectedDrive` (AUTO) does **nothing** and returns `DVDP_STATUS_CHOOSE_METHOD` or
 `DVDP_STATUS_UNKNOWN_FIRMWARE`, so the front-end can ask which key-set sequence to try and
-re-call `DvdPair_PairConnectedDriveEx(key, writeKV, method)` with:
+re-call `DvdPair_PairConnectedDrive(method)` with:
 
 - `DVDP_ODD_OLD` — the old path: `BB/30` unlock (`0xFF`) + `BB/30` set key. (What
   `sub_920894C8` does; works for every pre‑D4S drive.)
 - `DVDP_ODD_NEW` — the new path: `BB/30` unlock + `BB/30` set key **+ `A5/10` authenticate**
   with the key (the extra handshake `sub_92089088` uses on newer drives/boards).
 
-An explicit `DVDP_ODD_OLD`/`_NEW` overrides detection entirely (including for a D4S), so you
-can force either sequence on any drive. `DVDP_ODD_AUTO` keeps mirroring the recovery for
-recognized firmware.
+An explicit `DVDP_ODD_OLD`/`_NEW` overrides detection entirely, so you can force either sequence
+on any drive. The tool doesn't reproduce the recovery's D4S provisioning flow.
 
 ## Reproducing it from the dashboard
 
 See `DvdPair.h` / `DvdPair.cpp`. The important realisation for *swapping drives for test*:
-you usually do **not** need a brand‑new random key. You have two clean options:
+you do **not** need a brand‑new random key. Writing the console's existing KeyVault DVD key into
+the freshly‑swapped drive with `BB/30` makes the drive match the console, and the KeyVault never
+changes.
 
-- **Adopt console → drive:** read the console's existing KeyVault DVD key
-  (`XeKeysGetKey(0x1A)`) and write it into the freshly‑swapped drive with `BB/30`. The drive
-  now matches the console. (Recommended for swapping test drives.)
-- **Full re‑pair (what recovery does):** generate a fresh 16‑byte key, write it to both the
-  KeyVault (`XeKeysSetKey(0x1A)` + `XeKeysSaveKeyVault`) and the drive.
+**But the hypervisor won't hand that key out.** `XeKeysGetKey(0x1A)` returns `0xC8000002`: key
+`0x1A` has properties `0x28110010`, and `HvxKeysGetKey` only allows a read when `0x01000000` or
+`0x02000000` is set (21256 HV image; confirmed on a 17559 RGH/JTAG console, where the serial at
+`0x14` reads fine). That's why the recovery always generates a new key. The tool currently tries
+this read, so pairing (A) fails until the key comes from somewhere else.
 
-**Back up your KeyVault first.** Writing key `0x1A` and `XeKeysSaveKeyVault` persists to NAND.
+The recovery's full re‑pair (new random key, `XeKeysSetKey(0x1A)`, drive write, then
+`XeKeysSaveKeyVault`) is deliberately not implemented.

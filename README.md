@@ -5,22 +5,27 @@ a DVD drive to the console, so drives can be swapped between consoles without re
 or reflashing. It reproduces the pairing step of the 11775.3 recovery; see
 [PAIRING_ANALYSIS.md](PAIRING_ANALYSIS.md) for how that works.
 
-**Not yet confirmed working on hardware.** Parts of the drive interface are reconstructed (flagged
-in `DvdPair.cpp`). Back up your KeyVault before using it.
+**Pairing has worked on a Lite-On drive; other drives are untested.** **An earlier build bricked a Hitachi GDR3120L** (the
+key write timed out after the unlock); the current build hasn't been tried on a Hitachi, so treat
+Hitachi drives as risky.
+
+Pairing needs a hypervisor patch that lets a title read the console's DVD key: a stock hypervisor
+refuses (`0xC8000002`). The tool only reads the console's KeyVault; it never changes it.
 
 Runs on a devkit/test kit, or on a retail console with a patched hypervisor (RGH/JTAG).
 
 ## Controls
 
 - **A** — pair drive to this console (writes the console's current KeyVault DVD key into the
-  drive; KeyVault untouched). On an unrecognized firmware it asks X=OLD / Y=NEW.
-- **X** — read and print the drive's current key.
-- **Y** — full re-pair: generate a new key, write to KeyVault **and** drive (back up first).
+  drive; KeyVault untouched). On a DG-16D4S, DG-16D5S, DL10N or unrecognized firmware it asks
+  X=OLD / Y=NEW.
+- **X** — read and print the drive's current key. Not every drive supports this: `0xC0000010`
+  means the drive rejected the request, not that it can't be paired.
 - **BACK** — exit (reboot).
 
 ## Files
 
-- `main.cpp` — console UI (detect drive, pair, read key, full re-pair).
+- `main.cpp` — console UI (detect drive, pair, read key).
 - `DvdPair.cpp/.h` — the pairing logic.
 - `OutputConsole.cpp/.h` — thin wrapper over `ATG::Console` (`dprintf`).
 - `atg/Common/` — ATG framework (headers, sources, `Release_LTCG/AtgFramework.lib`); only the

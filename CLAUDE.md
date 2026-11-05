@@ -50,7 +50,7 @@ a tool is broken.
 - **Launching:** the 360 only auto-launches `default.xex`, so `PairDvd.xex` must be launched by
   path. Set `NAME=Default` in `build.bat` for folder auto-launch.
 - **NT/XeKeys APIs:** `DvdPair.cpp` declares them itself (C linkage) because `<xtl.h>` doesn't
-  declare `NtOpenFile`/`ANSI_STRING`/`XboxHardwareInfo`. They resolve from `xboxkrnl.lib` by
+  declare `NtOpenFile`/`ANSI_STRING`. They resolve from `xboxkrnl.lib` by
   name, and the local struct layouts match the kernel's.
 
 ## Key findings (from the binaries)
@@ -59,21 +59,35 @@ a tool is broken.
 - **KeyVault side:** the DVD key is **KeyVault index `0x1A`**. `XeKeysSetKey(0x1A, key, 16)` then
   `XeKeysSaveKeyVault`. (`XeKeysSetKey` -> `HvxKeysMarshal(0x36,...)`, `XeKeysSaveKeyVault` ->
   `HvxKeysMarshal(0x35,...)`. Index 0x16 = game region, 0x36 = cert.)
+- **Key `0x1A` is write-only: `XeKeysGetKey(0x1A)` returns `0xC8000002`.** Confirmed on the
+  user's console (kernel 2.0.17559.0, RGH/JTAG-patched HV): properties `0x28110010`, while the
+  serial (`0x14`, properties `0x0903000C`) reads fine. In the 21256 HV image, `HvxKeysGetKey`
+  only allows a read when the properties have `0x01000000` or `0x02000000` set; the HV patch
+  doesn't change that. This is why the recovery always generates a new key instead of reusing
+  the old one. A tool that keeps the console's key must get it some other way.
 - **Drive side:** open `\Device\CdRom0` (`NtOpenFile`, access `0x80100000`, share 1, openopt
-  `0x20`); vendor commands via `NtDeviceIoControlFile`, **IOCTL `0x0004D014`**.
-  - Command block: `[u16 size][6 rsvd][opcode][modifier][payload...]`.
-  - `BB/30` + 16×`0xFF` = unlock; `BB/30` + key = set key; `A5/10` + key = authenticate;
-    `0x25` = read current 16-byte drive key/id.
-  - The IOCTL request is 36 bytes wrapping a pointer to the command block (layout in
-    `PAIRING_ANALYSIS.md`).
+  `0x20`); SCSI commands via `NtDeviceIoControlFile`, **IOCTL `0x0004D014`**, the kernel's SCSI
+  pass-through. Its 36-byte request holds the direction (`+0x07`), data length (`+0x08`), data
+  buffer (`+0x10`) and **CDB (`+0x14`)**; layout in `PAIRING_ANALYSIS.md`.
+  - INQUIRY is CDB `12 00 00 00 24 C0`. Everything else is a vendor mode page: MODE SELECT(10)
+    (`0x55`) to write, MODE SENSE(10) (`0x5A`) to read. Don't send reads with `0x55`: that
+    caused "SATA: command timed out" and `0xC000016B`.
+  - Mode parameter list: `[u16 mode data length][6 rsvd][page code][page length][data...]`,
+    transferred as mode data length + 2 (58 bytes for page `BB`).
+  - `BB/30` + 16×`0xFF` = unlock; `BB/30` + key = set key; `A5/10` + key = authenticate; MODE
+    SENSE page `0x25` = read current 16-byte drive key/id.
 
 ## Decisions
 
+0. **The tool never writes to the console.** It only reads the KeyVault key and writes it to the
+   drive. There is no `XeKeysSetKey`/`XeKeysSaveKeyVault` call, so no full re-pair and no D4S
+   provisioning, at the user's request. Don't add KeyVault writes back.
 1. **"Old vs new" is the console, not the drive.** Gate is
    `XboxHardwareInfo.Flags & 0xF0000000 >= 0x40000000` -> new writer `sub_92089088`, else old
    writer `sub_920894C8`. The Falcon is "old" and uses plain `BB/30` for *every* drive. The
    only drive-model special case is the Lite-On **DG-16D4S**, only on new boards, and it writes
-   *fixed Microsoft test constants*, so it's provisioning rather than general pairing.
+   *fixed Microsoft test constants*, so it's provisioning rather than general pairing. The tool
+   doesn't implement it or check the console generation.
 2. **Universal command set.** `BB`/`A5`/`0x25` are MS-mandated vendor commands common to all
    licensed 360 drives, and the IOCTL is raw passthrough. Drive *brand* only affects
    detection/reporting.
@@ -83,12 +97,17 @@ a tool is broken.
    `DG-16D4S`. **BenQ is `PBDS`, Lite-On is `PLDS`: one letter apart, kept distinct.**
 4. **BenQ fw-6243 units report as `SATA`/`DVD-ROM`** on real hardware (user-confirmed), so they're
    matched explicitly as BenQ instead of UNKNOWN.
-5. **DG-16D5S is intentionally unsupported**: its flash isn't writable, so the key can't be set.
-   It's detected and refused up front (`0xC00000A3`) rather than failing at the write.
+5. **DG-16D4S, DG-16D5S and DL10N (`HL-DT-ST`/`DVD-ROM DL10N`) always ask for a method.** These
+   models can have different controller chips running D2S firmware (user-reported), so on any
+   console AUTO returns `DVDP_STATUS_CHOOSE_METHOD` (writes nothing) and the UI offers OLD and
+   NEW. The D5S is no longer refused; a unit with unwritable flash just fails at the write.
+   Known revisions (user-supplied unless a kernel/recovery lists them, as for `9504`/`J504`): D4S
+   `9504` `0225` `0272` `0401` `1071` `J504`; D5S `1175` `1532`; DL10N `0500` `0502`. A known
+   revision only changes the `Firmware:` line; these models still ask.
 6. **Unrecognized firmware is not guessed.** `Odd_DetectDrive` sets `KnownFirmware`; the AUTO
    path returns `DVDP_STATUS_UNKNOWN_FIRMWARE` (writes nothing) so the UI can ask the user to
    pick `DVDP_ODD_OLD` (BB/30 unlock+set) or `DVDP_ODD_NEW` (+ A5/10 authenticate) and re-call
-   `DvdPair_PairConnectedDriveEx`. Explicit OLD/NEW overrides detection.
+   `DvdPair_PairConnectedDrive`. Explicit OLD/NEW overrides detection.
 7. **The privilege boundary is the hypervisor, not a kernel gate.** `XeKeys*` are exported on
    retail and devkit alike, and the kernel is a thin marshaller to the HV. Enforcement is
    HV-side, keyed off the XEX's signed system flags (the recovery is "Manufacturing
@@ -97,16 +116,25 @@ a tool is broken.
 
 ## Caveats / open items
 
-- **Not yet confirmed working on hardware.** An earlier build, which had no embedded font,
-  crashed right at launch. The font is now embedded, but the fix hasn't been tested on a console.
-  If it still crashes, suspect `Odd_DetectDrive`, which runs at startup before the menu.
-- **Reconstructed code:** opcodes, device path, IOCTL code and KeyVault calls come from the
-  binaries, but a few reserved bytes of the IOCTL request struct and the INQUIRY read-command
-  passthrough layout are reconstructed (flagged inline in `DvdPair.cpp`). Validate on hardware.
+- **Pairing (A) needs the DVD key to be readable.** On a stock HV, A stops at
+  `XeKeysGetKey(0x1A)` (see Key findings). With the user's updated HV patch the read succeeds.
+- **Hardware results (user-reported):**
+  - **Lite-On: pairing worked**, with the 18-byte sense output buffer passed to the IOCTL (as the
+    recovery's old-console sender `sub_92089430` does).
+  - **Hitachi GDR3120L rev `0047`: bricked.** Before the sense buffer was added, the unlock
+    (`BB/30` + 16×`FF`) succeeded, then the set-key write timed out ("SATA: command timed out",
+    "reset timed out", `0xC000016B`), and the drive was left unusable. It isn't known whether the
+    sense buffer fixes Hitachi drives; treat Hitachi pairing as untested and risky.
+- **Debug builds trace each step** (`DVDP_TRACE_ENABLED`, set by `build.bat` in debug): device
+  open, every SCSI CDB and status, kernel version, and key properties/read status. Use that output
+  instead of guessing which call failed. Key bytes are never printed.
+- **Reading the drive key (X) doesn't work on every drive.** A tested drive rejected MODE SENSE
+  page `0x25` with `0xC0000010` (sense `5`/`0x24`, invalid field in CDB), while INQUIRY worked.
+  The recovery only reads this page for a DG-16D4S, so this is probably firmware-specific, but
+  the supported revisions are unknown. Keep the feature, and don't treat this failure as a
+  pairing failure or use the read to verify a pairing.
 - `DVDP_ODD_NEW` authenticates (`A5/10`) with the *same* key it sets. The recovery's D4S flow
   authenticates with a separate constant; add an auth-key parameter if that's ever needed.
-- On a patched-HV retail box, confirm the KeyVault is the real writable one before relying on
-  `XeKeysSaveKeyVault` (a synthetic KV may persist elsewhere). The drive-side write is unaffected.
 
 ## Reference sources (not in this repo)
 

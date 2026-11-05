@@ -40,7 +40,8 @@ set "DEFS=/DNDEBUG /D_XBOX /DXBOX /D_XBOX_CRT_DEPRECATE_INSECURE"
 set "INCS=/I"%ATG_DIR%\Common" /I."
 rem Debug only changes how our code is built. NDEBUG and /LTCG stay on so it still links
 rem against the release libs (the prebuilt LTCG AtgFramework.lib and the SDK's).
-set "CLCONFIG=/Zi /Od /Fd"%OUTDIR%\%NAME%_cl.pdb""
+rem DVDP_TRACE_ENABLED prints each pairing step and its status.
+set "CLCONFIG=/Zi /Od /DDVDP_TRACE_ENABLED /Fd"%OUTDIR%\%NAME%_cl.pdb""
 set "LINKCONFIG=/DEBUG /PDB:"%OUTDIR%\%NAME%.pdb" /OPT:REF /OPT:NOICF"
 if /i "%~1"=="release" (
   set "CLCONFIG=/O2 /GL"

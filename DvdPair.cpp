@@ -5,12 +5,19 @@
 // (default.xex). See PAIRING_ANALYSIS.md.
 //
 // Build as part of a DEVKIT / TEST KIT title (XDK). The native calls below are the
-// ones the recovery itself uses. Offsets/opcodes marked "confirmed" came straight
-// out of the recovery; the two bytes marked "observed constant" are reserved fields
-// that were always the same value in the recovery and are reproduced verbatim.
+// ones the recovery itself uses. The drive is driven with SCSI commands through the
+// kernel's pass-through IOCTL, laid out as in the recovery and the kernel's own callers.
 //------------------------------------------------------------------------------
 #include "DvdPair.h"
 #include <string.h>
+
+// Debug builds print each step and its status. Key bytes are never printed.
+#ifdef DVDP_TRACE_ENABLED
+#include "OutputConsole.h"
+#define DVDP_TRACE(...) dprintf(__VA_ARGS__)
+#else
+#define DVDP_TRACE(...)
+#endif
 
 //==============================================================================
 // Native kernel / NT imports.
@@ -47,62 +54,65 @@ long NtDeviceIoControlFile(void* FileHandle, void* Event, void* ApcRoutine, void
                            void* InputBuffer, unsigned long InputBufferLength,
                            void* OutputBuffer, unsigned long OutputBufferLength);
 long NtWaitForSingleObjectEx(void* Handle, char WaitMode, int Alertable, void* Timeout);
-// KeyVault exports (no public header; confirmed from xboxkrnld.exe.i64).
-long XeKeysSetKey(unsigned long Index, void* Buffer, unsigned long Length);
+// KeyVault export (no public header; confirmed from xboxkrnld.exe.i64). This tool only
+// ever reads the KeyVault.
 long XeKeysGetKey(unsigned long Index, void* Buffer, unsigned long* Length);
-long XeKeysSaveKeyVault(void);
-long XeKeysGenerateRandomKey(void* Buffer, unsigned long Length);
-// Kernel-exported hardware descriptor (ordinal 0x156); first DWORD is Flags.
-struct DVDP_XBOX_HARDWARE_INFO { unsigned long Flags; };
-extern DVDP_XBOX_HARDWARE_INFO XboxHardwareInfo;
+#ifdef DVDP_TRACE_ENABLED
+// Returns the hypervisor's live permission/length dword for a key (low 16 bits = length).
+unsigned long XeKeysGetKeyProperties(unsigned long Index);
+struct DVDP_XBOX_KRNL_VERSION { unsigned short Major, Minor, Build, Qfe; };
+__declspec(dllimport) extern DVDP_XBOX_KRNL_VERSION XboxKrnlVersion;
+#endif
 }
 
-// Recovery's known DG-16D4S provisioning constants (from byte_92017040).
-// These are FIXED Microsoft test values, not a per-console key.
-static const unsigned char kD4S_BlankMarker[16] =
+// Written to the key page to unlock the drive's key slot (recovery sub_920D7B80).
+static const unsigned char kUnlockKey[16] =
     { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
-static const unsigned char kD4S_KeyConstA[16] =     // byte_92017040 + 0x20
-    { 0xFA,0xEE,0xDD,0xCC,0xBB,0xAA,0x99,0x88,0x77,0x66,0x55,0x44,0x33,0x22,0x11,0x00 };
-static const unsigned char kD4S_AuthConstB[16] =    // byte_92017040 + 0x30
-    { 0x64,0x7F,0x45,0xE8,0x6B,0x7C,0x2B,0xE9,0x36,0xCB,0x0F,0x0B,0x92,0x64,0x45,0xB5 };
 
 #define DVDP_SUCCESS(s)  ((DVDP_STATUS)(s) >= 0)
 #define DVDP_PENDING     (0x00000103L)         // STATUS_PENDING
 
+#define SCSI_INQUIRY         0x12
+#define SCSI_MODE_SELECT10   0x55
+#define SCSI_MODE_SENSE10    0x5A
+
+// Mode pages the recovery uses. PAGE_SELECT_* values carry the PS bit (0x80).
+#define ODD_PAGE_SELECT_SET_KEY       0xBB    // length 0x30
+#define ODD_PAGE_SELECT_AUTHENTICATE  0xA5    // length 0x10
+#define ODD_PAGE_SENSE_DRIVE_KEY      0x25
+
+// ModeDataLength excludes itself, so the transfer is always this value + 2.
+#define ODD_MODE_DATA_LENGTH_SET_KEY  56      // 8 header + 2 page + 48 data - 2
+#define ODD_MODE_DATA_LENGTH_SHORT    24      // 8 header + 2 page + 16 data - 2
+
 //==============================================================================
-// ODD command block + raw IOCTL request (exact layout from the recovery).
+// SCSI pass-through request and mode parameter list. [kernel xboxkrnld 4C6787B8:
+// SataCdRomStartScsiPassThrough, SataCdRomSendAP20Sense/Select; recovery sub_920D7A40,
+// sub_920D7AC8, sub_920D7CA8]
 //==============================================================================
 
-// Command block: [u16 size][6 reserved][opcode][modifier][payload...]
-// Max payload we need is 16 bytes of key; recovery zero-pads to 56.
-#pragma pack(push, 1)
-typedef struct _ODD_COMMAND {
-    unsigned short Size;             // +0x00 total size of this block
-    unsigned char  Reserved0[6];     // +0x02 (zero)
-    unsigned char  Opcode;           // +0x08 e.g. 0xBB / 0xA5 / 0x25
-    unsigned char  Modifier;         // +0x09 e.g. 0x30 / 0x10
-    unsigned char  Payload[46];      // +0x0A key / data (recovery used up to 56 total)
-} ODD_COMMAND;
+// Mode parameter list: the data buffer of MODE SELECT / MODE SENSE. The u16 keeps it on
+// an even address, which the kernel requires of pass-through buffers.
+typedef struct _ODD_MODE_PAGE {
+    unsigned short ModeDataLength;   // +0x00 big-endian, excludes this field
+    unsigned char  Reserved[6];      // +0x02 rest of the mode header (zero)
+    unsigned char  PageCode;         // +0x08
+    unsigned char  PageLength;       // +0x09
+    unsigned char  Data[48];         // +0x0A key at the start, zero-padded
+} ODD_MODE_PAGE;
+typedef char ODD_MODE_PAGE_size_check[(sizeof(ODD_MODE_PAGE) == 58) ? 1 : -1];
 
-// 36-byte request handed to IOCTL 0x4D014; it points at the ODD_COMMAND block.
-typedef struct _ODD_RAW_REQUEST {
-    unsigned short RequestSize;      // +0x00 = 0x0024 (36)
-    unsigned short Reserved0;        // +0x02 = 0
-    unsigned char  Reserved1[3];     // +0x04 = 0
-    unsigned char  Direction;        // +0x07 0 = to drive, 1 = from drive
-    unsigned long  TransferLength;   // +0x08 = Command.Size + 2
-    unsigned long  Reserved2;        // +0x0C = 0
-    ODD_COMMAND*   Command;          // +0x10 pointer to the command block
-    unsigned char  Signature;        // +0x14 = 0x55 ('U')   (observed constant)
-    unsigned char  Reserved3[6];     // +0x15 = 0
-    unsigned short TransferLength2;  // +0x1B = Command.Size + 2
-    unsigned char  Reserved4[3];     // +0x1D = 0
-    unsigned long  Reserved5;        // +0x20 = 0  (pads struct to 0x24)
-} ODD_RAW_REQUEST;
-#pragma pack(pop)
-
-// The recovery hands a 36-byte (0x24) request to IOCTL 0x4D014; keep it exact.
-typedef char ODD_RAW_REQUEST_size_check[(sizeof(ODD_RAW_REQUEST) == 0x24) ? 1 : -1];
+// 36-byte request handed to IOCTL 0x4D014.
+typedef struct _ODD_SCSI_REQUEST {
+    unsigned short Length;           // +0x00 = 0x0024 (36)
+    unsigned char  Reserved0[5];     // +0x02 = 0
+    unsigned char  DataIn;           // +0x07 0 = to drive, 1 = from drive
+    unsigned long  DataLength;       // +0x08 even, at most 0x20000
+    unsigned long  Reserved1;        // +0x0C = 0
+    void*          DataBuffer;       // +0x10 even address
+    unsigned char  Cdb[16];          // +0x14
+} ODD_SCSI_REQUEST;
+typedef char ODD_SCSI_REQUEST_size_check[(sizeof(ODD_SCSI_REQUEST) == 0x24) ? 1 : -1];
 
 // --- Open / close \Device\CdRom0 exactly as the recovery does ----------------
 static DVDP_STATUS OddOpen(void** outHandle)
@@ -120,58 +130,110 @@ static DVDP_STATUS OddOpen(void** outHandle)
     DVDP_IO_STATUS_BLOCK iosb;
     *outHandle = 0;
     // DesiredAccess 0x80100000, ShareAccess 1, OpenOptions 0x20 -> from recovery.
-    return NtOpenFile(outHandle, 0x80100000, &oa, &iosb, 1, 0x20);
+    DVDP_STATUS st = NtOpenFile(outHandle, 0x80100000, &oa, &iosb, 1, 0x20);
+    DVDP_TRACE("  [trace] NtOpenFile(%s) = 0x%08X\n", ODD_DEVICE_NAME, (unsigned)st);
+    return st;
 }
 
 // --- Synchronous NtDeviceIoControlFile wrapper (recovery sub_92027480) -------
-static DVDP_STATUS OddIoctl(void* handle, ODD_RAW_REQUEST* req)
+static DVDP_STATUS OddIoctl(void* handle, ODD_SCSI_REQUEST* req)
 {
     DVDP_IO_STATUS_BLOCK iosb;
     iosb.Status = DVDP_PENDING;
 
+    // 18-byte sense buffer as the output, like the recovery's old-console sender
+    // (sub_92089430). The kernel accepts an output length of 0 or at least 0x12.
+    __declspec(align(4)) unsigned char sense[18];
+    memset(sense, 0, sizeof(sense));
+
     long st = NtDeviceIoControlFile(handle, 0, 0, 0, &iosb, IOCTL_ODD_RAW_CMD,
-                                    req, sizeof(ODD_RAW_REQUEST), 0, 0);
+                                    req, sizeof(ODD_SCSI_REQUEST), sense, sizeof(sense));
     if (st == DVDP_PENDING) {
-        st = NtWaitForSingleObjectEx(handle, 1 /*KernelMode*/, 0, 0);
+        st = NtWaitForSingleObjectEx(handle, 1 /*UserMode*/, 0, 0);
         if (DVDP_SUCCESS(st))
             st = iosb.Status;
     }
+    DVDP_TRACE("  [trace] SCSI CDB %02X %02X %02X .. %02X %02X %s %lu bytes = 0x%08X\n",
+               req->Cdb[0], req->Cdb[1], req->Cdb[2], req->Cdb[7], req->Cdb[8],
+               req->DataIn ? "from drive" : "to drive", req->DataLength, (unsigned)st);
+    DVDP_TRACE("  [trace]   sense %02X key %X ASC %02X ASCQ %02X, returned %lu bytes\n",
+               sense[0], sense[2] & 0x0F, sense[12], sense[13], iosb.Information);
     return st;
 }
 
-// --- Issue one vendor command to the drive -----------------------------------
-// opcode/modifier/payload -> command block; direction 0 = write to drive.
-static DVDP_STATUS OddSendCommand(void* handle,
-                                  unsigned char opcode, unsigned char modifier,
-                                  unsigned char direction,
-                                  const unsigned char* payload, int payloadLen,
-                                  int blockTotalSize)
+static void OddInitRequest(ODD_SCSI_REQUEST* req, int dataIn, void* buffer, unsigned long length)
 {
-    ODD_COMMAND cmd;
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.Size     = (unsigned short)blockTotalSize;   // 56 for BB/30, 24 for A5/10
-    cmd.Opcode   = opcode;
-    cmd.Modifier = modifier;
-    if (payload && payloadLen > 0)
-        memcpy(cmd.Payload, payload, payloadLen);
+    memset(req, 0, sizeof(*req));
+    req->Length     = sizeof(ODD_SCSI_REQUEST);
+    req->DataIn     = (unsigned char)dataIn;
+    req->DataLength = length;
+    req->DataBuffer = buffer;
+}
 
-    ODD_RAW_REQUEST req;
-    memset(&req, 0, sizeof(req));
-    req.RequestSize     = 0x0024;
-    req.Direction       = direction;
-    req.TransferLength  = (unsigned long)(blockTotalSize + 2);
-    req.Command         = &cmd;
-    req.Signature       = 0x55;
-    req.TransferLength2 = (unsigned short)(blockTotalSize + 2);
+// --- MODE SELECT(10): write one mode page to the drive -----------------------
+static DVDP_STATUS OddModeSelect(void* handle, unsigned char pageCode, unsigned char pageLength,
+                                 const unsigned char key[DVDP_DVD_KEY_SIZE],
+                                 unsigned short modeDataLength)
+{
+    ODD_MODE_PAGE page;
+    memset(&page, 0, sizeof(page));
+    page.ModeDataLength = modeDataLength;
+    page.PageCode       = pageCode;
+    page.PageLength     = pageLength;
+    memcpy(page.Data, key, DVDP_DVD_KEY_SIZE);
+
+    unsigned long length = (unsigned long)modeDataLength + 2;
+    ODD_SCSI_REQUEST req;
+    OddInitRequest(&req, 0, &page, length);
+    req.Cdb[0] = SCSI_MODE_SELECT10;
+    req.Cdb[7] = (unsigned char)(length >> 8);
+    req.Cdb[8] = (unsigned char)length;
 
     return OddIoctl(handle, &req);
+}
+
+// --- MODE SENSE(10): read the 16-byte drive key page -------------------------
+static DVDP_STATUS OddReadKeyPage(void* handle, unsigned char outKey[DVDP_DVD_KEY_SIZE])
+{
+    ODD_MODE_PAGE page;
+    memset(&page, 0, sizeof(page));
+    page.ModeDataLength = ODD_MODE_DATA_LENGTH_SHORT;
+
+    unsigned long length = ODD_MODE_DATA_LENGTH_SHORT + 2;
+    ODD_SCSI_REQUEST req;
+    OddInitRequest(&req, 1, &page, length);
+    req.Cdb[0] = SCSI_MODE_SENSE10;
+    req.Cdb[2] = ODD_PAGE_SENSE_DRIVE_KEY;
+    req.Cdb[7] = (unsigned char)(length >> 8);
+    req.Cdb[8] = (unsigned char)length;
+
+    DVDP_STATUS st = OddIoctl(handle, &req);
+    if (DVDP_SUCCESS(st))
+        memcpy(outKey, page.Data, DVDP_DVD_KEY_SIZE);
+    return st;
+}
+
+// Unlock (BB/30 + 16x0xFF) then set (BB/30 + key) (recovery sub_920D7B80).
+static DVDP_STATUS OddWriteKey(void* handle, const unsigned char key[DVDP_DVD_KEY_SIZE])
+{
+    DVDP_STATUS st = OddModeSelect(handle, ODD_PAGE_SELECT_SET_KEY, 0x30, kUnlockKey,
+                                   ODD_MODE_DATA_LENGTH_SET_KEY);
+    if (DVDP_SUCCESS(st))
+        st = OddModeSelect(handle, ODD_PAGE_SELECT_SET_KEY, 0x30, key,
+                           ODD_MODE_DATA_LENGTH_SET_KEY);
+    return st;
+}
+
+// A5/10 authenticate with a 16-byte key (recovery sub_920D7DD8).
+static DVDP_STATUS OddAuthenticateKey(void* handle, const unsigned char key[DVDP_DVD_KEY_SIZE])
+{
+    return OddModeSelect(handle, ODD_PAGE_SELECT_AUTHENTICATE, 0x10, key,
+                         ODD_MODE_DATA_LENGTH_SHORT);
 }
 
 //==============================================================================
 // Drive-side public helpers.
 //==============================================================================
-
-static DVDP_STATUS Odd_AuthenticateKey(void* h, const unsigned char key[DVDP_DVD_KEY_SIZE]);
 
 DVDP_STATUS Odd_SetDriveKeyMethod(const unsigned char key[DVDP_DVD_KEY_SIZE],
                                   DVDP_ODD_METHOD method)
@@ -181,25 +243,15 @@ DVDP_STATUS Odd_SetDriveKeyMethod(const unsigned char key[DVDP_DVD_KEY_SIZE],
     if (!DVDP_SUCCESS(st))
         return st;                                   // "Didn't find a DVD Drive"
 
-    // Both methods: unlock (BB/30 + 16x0xFF) then set (BB/30 + key), block size 56.
-    unsigned char ff[DVDP_DVD_KEY_SIZE];
-    memset(ff, 0xFF, sizeof(ff));
-    st = OddSendCommand(h, 0xBB, 0x30, 0, ff, DVDP_DVD_KEY_SIZE, 56);
-    if (DVDP_SUCCESS(st))
-        st = OddSendCommand(h, 0xBB, 0x30, 0, key, DVDP_DVD_KEY_SIZE, 56);
+    st = OddWriteKey(h, key);
 
-    // NEW method additionally authenticates with the key (A5/10, block size 24),
-    // matching the extra handshake the recovery's new-console path does for D4S.
+    // NEW method additionally authenticates with the key, matching the extra handshake
+    // the recovery's new-console path does for D4S.
     if (DVDP_SUCCESS(st) && method == DVDP_ODD_NEW)
-        st = Odd_AuthenticateKey(h, key);
+        st = OddAuthenticateKey(h, key);
 
     NtClose(h);
     return st;                                        // caller logs "Failed to ... ODD"
-}
-
-DVDP_STATUS Odd_SetDriveKey(const unsigned char key[DVDP_DVD_KEY_SIZE])
-{
-    return Odd_SetDriveKeyMethod(key, DVDP_ODD_OLD); // old path: BB/30 unlock+set
 }
 
 DVDP_STATUS Odd_ReadDriveKey(unsigned char outKey[DVDP_DVD_KEY_SIZE])
@@ -209,32 +261,9 @@ DVDP_STATUS Odd_ReadDriveKey(unsigned char outKey[DVDP_DVD_KEY_SIZE])
     if (!DVDP_SUCCESS(st))
         return st;
 
-    // vendor cmd 0x25 (recovery sub_920D7EB8), reads 16 bytes back, block size 24.
-    ODD_COMMAND cmd;
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.Size   = 24;
-    cmd.Opcode = 0x25;
-
-    ODD_RAW_REQUEST req;
-    memset(&req, 0, sizeof(req));
-    req.RequestSize     = 0x0024;
-    req.Direction       = 1;                          // from drive
-    req.TransferLength  = 24 + 2;
-    req.Command         = &cmd;
-    req.Signature       = 0x55;
-    req.TransferLength2 = 24 + 2;
-
-    st = OddIoctl(h, &req);
-    if (DVDP_SUCCESS(st))
-        memcpy(outKey, cmd.Payload, DVDP_DVD_KEY_SIZE);
+    st = OddReadKeyPage(h, outKey);                   // recovery sub_920D7EB8
     NtClose(h);
     return st;
-}
-
-// A5/10 authenticate with a 16-byte key (recovery sub_920D7DD8, block size 24).
-static DVDP_STATUS Odd_AuthenticateKey(void* h, const unsigned char key[DVDP_DVD_KEY_SIZE])
-{
-    return OddSendCommand(h, 0xA5, 0x10, 0, key, DVDP_DVD_KEY_SIZE, 24);
 }
 
 //==============================================================================
@@ -250,14 +279,22 @@ static DVD_DRIVE_FAMILY ClassifyDrive(const DVD_DRIVE_INFO* di)
     // below (BenQ + extra firmware revisions) is verified against the newer SDK kernel
     // ../21256.18_Xenon_Recovery_with_Symbols (xboxkrnlc 55EFF578), whose match table
     // holds these literal 28-char records (vendor8+product16+rev4):
-    //   "HL-DT-ST" "DVD-ROM GDR3120L" rev 0046/0047/0058/0059/0078/0079   (Hitachi-LG)
+    //   "HL-DT-ST" "DVD-ROM GDR3120L" rev 0046/0047/0058/0059/0061/0078/0079   (Hitachi-LG)
     //   "TSSTcorp" "DVD-ROM TS-H943A" rev ms25/ms28                       (Samsung)
     //   "PBDS    " "VAD6038-64930C"   (no rev)                            (BenQ)
     //   "PLDS    " "DG-16D2S"         rev 7485/8385/9345                  (Lite-On DG-16D2S)
     //   "PLDS    " "DG-16D4S"         rev 9504  (+ "J504" from 11775.3 recovery table)
     //   "SATA    " "DVD-ROM"          rev 6243  (generic SATA fallback)
-    // Note the vendors are distinct: BenQ = "PBDS", Lite-On = "PLDS". DG-16D5S is omitted
-    // on purpose (its flash isn't writable, so the key can't be set).
+    //   "HL-DT-ST" "DVD-ROM DL10N"    (Hitachi-LG slim)
+    // Note the vendors are distinct: BenQ = "PBDS", Lite-On = "PLDS". DG-16D5S isn't in
+    // either kernel's table. The extra GDR3120L, D4S, D5S and DL10N revisions in
+    // IsKnownFirmware are user-supplied, not from these tables.
+
+    // These models can have different controller chips running D2S firmware, so the model
+    // doesn't tell us the pairing method. Matched first, whatever the vendor string says.
+    if (strstr(di->Product, "DG-16D5S")) return DVD_FAMILY_LITEON_D5S;
+    if (strstr(di->Product, "DG-16D4S")) return DVD_FAMILY_LITEON_D4S;
+    if (strstr(di->Product, "DL10N"))    return DVD_FAMILY_HITACHI_DL10N;
 
     // BenQ (Philips/BenQ lineage): normally vendor "PBDS" product "VAD6038-64930C".
     // Confirmed on hardware: the firmware-"6243" units report generically as vendor
@@ -266,13 +303,11 @@ static DVD_DRIVE_FAMILY ClassifyDrive(const DVD_DRIVE_INFO* di)
     // also read "PHILIPS"/"BENQ".
     if (!strncmp(di->Vendor, "PBDS", 4) || !strncmp(di->Vendor, "BENQ", 4) ||
         !strncmp(di->Vendor, "PHILIPS", 7) || strstr(di->Product, "VAD6038") ||
-        (!strncmp(di->Vendor, "SATA", 4) && !strncmp(di->Revision, "6243", 4)) ||
-        (!strncmp(di->Vendor, "SATA", 4) && strstr(di->Product, "DVD-ROM")))
+        (!strncmp(di->Vendor, "SATA", 4) &&
+         (!strncmp(di->Revision, "6243", 4) || strstr(di->Product, "DVD-ROM"))))
         return DVD_FAMILY_BENQ;
     // Lite-On: vendor "PLDS" (older units "LITE-ON").
     if (!strncmp(di->Vendor, "PLDS", 4) || !strncmp(di->Vendor, "LITE-ON", 7)) {
-        if (strstr(di->Product, "DG-16D5S")) return DVD_FAMILY_LITEON_D5S;  // detect only; flash not writable
-        if (strstr(di->Product, "DG-16D4S")) return DVD_FAMILY_LITEON_D4S;
         if (strstr(di->Product, "DG-16D2S") ||
             !strncmp(di->Revision, "7485", 4) || !strncmp(di->Revision, "8385", 4) ||
             !strncmp(di->Revision, "9345", 4))
@@ -293,20 +328,25 @@ static DVD_DRIVE_FAMILY ClassifyDrive(const DVD_DRIVE_INFO* di)
 static int IsKnownFirmware(DVD_DRIVE_FAMILY fam, const char* rev, const char* product)
 {
     const char* const* list = 0;
-    static const char* hitachi[] = {"0046","0047","0058","0059","0061","0078","0079",0};
+    static const char* hitachi[] = {"0027","0032","0036","0037","0040","0046","0047","0058",
+                                    "0059","0061","0078","0079",0};
     static const char* samsung[] = {"ms25","ms28",0};
     static const char* d2s[]     = {"7485","8385","9345",0};
-    static const char* d4s[]     = {"9504","J504",0};
+    static const char* d4s[]     = {"9504","0225","0272","0401","1071","J504",0};
+    static const char* d5s[]     = {"1175","1532",0};
+    static const char* dl10n[]   = {"0500","0502",0};
     static const char* benq[]    = {"6243",0};  // + VAD6038 matched by product
     switch (fam) {
         case DVD_FAMILY_HITACHI:    list = hitachi; break;
         case DVD_FAMILY_SAMSUNG:    list = samsung; break;
         case DVD_FAMILY_LITEON_D2S: list = d2s;     break;
         case DVD_FAMILY_LITEON_D4S: list = d4s;     break;
+        case DVD_FAMILY_LITEON_D5S: list = d5s;     break;
+        case DVD_FAMILY_HITACHI_DL10N: list = dl10n; break;
         case DVD_FAMILY_BENQ:
             if (strstr(product, "VAD6038")) return 1;
             list = benq; break;
-        default: return 0;          // UNKNOWN family or D5S -> firmware not "known-good"
+        default: return 0;          // UNKNOWN family -> firmware not "known-good"
     }
     for (int i = 0; list[i]; ++i)
         if (!strncmp(rev, list[i], 4)) return 1;
@@ -322,191 +362,109 @@ DVDP_STATUS Odd_DetectDrive(DVD_DRIVE_INFO* outInfo)
     if (!DVDP_SUCCESS(st))
         return st;
 
-    // Standard SCSI INQUIRY: opcode 0x12, allocation length 36, 36 bytes back.
-    // NOTE: the raw passthrough layout for read commands should be confirmed against
-    // sub_920D7AC8 / sub_920D7CA8; the response's vendor/product/revision sit at
-    // INQUIRY response offsets 8..35 (the exact 28-byte field the recovery matches).
-    ODD_COMMAND cmd;
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.Size     = 36;
-    cmd.Opcode   = 0x12;              // INQUIRY
-    cmd.Modifier = 0x00;
-    cmd.Payload[4] = 36;             // allocation length (EVPD=0)
+    // INQUIRY, CDB 12 00 00 00 24 C0 with a 36-byte buffer. [kernel SataCdRomInitialize,
+    // recovery sub_920D7CA8] Vendor/product/revision sit at response offsets 8..35 (the
+    // exact 28-byte field the recovery matches).
+    __declspec(align(4)) unsigned char resp[36];
+    memset(resp, 0, sizeof(resp));
 
-    ODD_RAW_REQUEST req;
-    memset(&req, 0, sizeof(req));
-    req.RequestSize     = 0x0024;
-    req.Direction       = 1;         // from drive
-    req.TransferLength  = 36 + 2;
-    req.Command         = &cmd;
-    req.Signature       = 0x55;
-    req.TransferLength2 = 36 + 2;
+    ODD_SCSI_REQUEST req;
+    OddInitRequest(&req, 1, resp, sizeof(resp));
+    req.Cdb[0] = SCSI_INQUIRY;
+    req.Cdb[4] = sizeof(resp);
+    req.Cdb[5] = 0xC0;
 
     st = OddIoctl(h, &req);
     NtClose(h);
     if (!DVDP_SUCCESS(st))
         return st;
 
-    const unsigned char* resp = cmd.Payload;   // 36-byte INQUIRY response
     memcpy(outInfo->Vendor,   resp + 8,  8);  outInfo->Vendor[8]   = 0;
     memcpy(outInfo->Product,  resp + 16, 16); outInfo->Product[16] = 0;
     memcpy(outInfo->Revision, resp + 32, 4);  outInfo->Revision[4] = 0;
     memcpy(outInfo->Inquiry28, resp + 8, 28); outInfo->Inquiry28[28] = 0;
 
     outInfo->Family = ClassifyDrive(outInfo);
-    // The recovery matches the exact 28-byte strings "PLDS    DG-16D4S        J504"
-    // and "...9504"; treat any DG-16D4S as the special case.
-    outInfo->IsDG16D4S = (outInfo->Family == DVD_FAMILY_LITEON_D4S);
+    outInfo->AskMethod = (outInfo->Family == DVD_FAMILY_LITEON_D4S ||
+                          outInfo->Family == DVD_FAMILY_LITEON_D5S ||
+                          outInfo->Family == DVD_FAMILY_HITACHI_DL10N);
     outInfo->KnownFirmware = IsKnownFirmware(outInfo->Family, outInfo->Revision,
                                              outInfo->Product);
     return st;
 }
 
-int Dvd_IsNewGenerationConsole(void)
-{
-    return ((XboxHardwareInfo.Flags & 0xF0000000u) >= 0x40000000u) ? 1 : 0;
-}
+//==============================================================================
+// Console-side (KeyVault) public helper.
+//==============================================================================
 
-//==============================================================================
-// Console-side (KeyVault) public helpers.
-//==============================================================================
+#ifdef DVDP_TRACE_ENABLED
+// Show what this console's hypervisor says about a key, and try reading it. The console
+// serial (0x14) is the control: a stock hypervisor allows reading it but not the DVD key.
+static void TraceKeyAccess(unsigned long index, unsigned long size)
+{
+    unsigned char buf[32];
+    unsigned long len = size;
+    unsigned long props = XeKeysGetKeyProperties(index);
+    long st = XeKeysGetKey(index, buf, &len);
+    DVDP_TRACE("  [trace] Key 0x%02X: properties 0x%08lX, XeKeysGetKey = 0x%08X, length %lu\n",
+               index, props, (unsigned)st, len);
+}
+#endif
 
 DVDP_STATUS Dvd_GetConsoleKey(unsigned char outKey[DVDP_DVD_KEY_SIZE])
 {
+#ifdef DVDP_TRACE_ENABLED
+    DVDP_TRACE("  [trace] Kernel %u.%u.%u.%u\n", XboxKrnlVersion.Major, XboxKrnlVersion.Minor,
+               XboxKrnlVersion.Build, XboxKrnlVersion.Qfe);
+    TraceKeyAccess(0x14, 12);
+#endif
     unsigned long len = DVDP_DVD_KEY_SIZE;
-    return XeKeysGetKey(KV_INDEX_DVD_KEY, outKey, &len);
-}
-
-DVDP_STATUS Dvd_SetConsoleKey(const unsigned char key[DVDP_DVD_KEY_SIZE])
-{
-    DVDP_STATUS st = XeKeysSetKey(KV_INDEX_DVD_KEY, (void*)key, DVDP_DVD_KEY_SIZE);
-    if (!DVDP_SUCCESS(st))
-        return st;                                   // "Failed to set DVD Key in KeyVault"
-    return XeKeysSaveKeyVault();                      // persist to NAND
+    DVDP_STATUS st = XeKeysGetKey(KV_INDEX_DVD_KEY, outKey, &len);
+    DVDP_TRACE("  [trace] Dvd_GetConsoleKey: XeKeysGetKey(0x%02X) = 0x%08X, length %lu\n",
+               KV_INDEX_DVD_KEY, (unsigned)st, len);
+#ifdef DVDP_TRACE_ENABLED
+    DVDP_TRACE("  [trace] Key 0x%02X: properties 0x%08lX\n", KV_INDEX_DVD_KEY,
+               XeKeysGetKeyProperties(KV_INDEX_DVD_KEY));
+    if (DVDP_SUCCESS(st)) {
+        // Say whether the key came back blank, without printing it.
+        int zero = 1, ff = 1;
+        for (int i = 0; i < DVDP_DVD_KEY_SIZE; ++i) {
+            if (outKey[i] != 0x00) zero = 0;
+            if (outKey[i] != 0xFF) ff = 0;
+        }
+        DVDP_TRACE("  [trace] Console key contents: %s\n",
+                   zero ? "ALL ZERO" : ff ? "ALL FF" : "non-blank");
+    }
+#endif
+    return st;
 }
 
 //==============================================================================
-// High-level flows.
+// High-level flow.
 //==============================================================================
 
-DVDP_STATUS DvdPair_AdoptConsoleKeyIntoDrive(void)
-{
-    unsigned char key[DVDP_DVD_KEY_SIZE];
-    DVDP_STATUS st = Dvd_GetConsoleKey(key);
-    if (!DVDP_SUCCESS(st))
-        return st;
-    return Odd_SetDriveKey(key);                      // console unchanged
-}
-
-DVDP_STATUS DvdPair_PairWithKey(const unsigned char key[DVDP_DVD_KEY_SIZE],
-                                int alsoWriteKeyVault)
-{
-    if (alsoWriteKeyVault) {
-        DVDP_STATUS st = Dvd_SetConsoleKey(key);
-        if (!DVDP_SUCCESS(st))
-            return st;
-    }
-    return Odd_SetDriveKey(key);
-}
-
-DVDP_STATUS DvdPair_RepairWithNewKey(void)
-{
-    // Recovery generates a random key, validates it, retries until valid. A simple
-    // non-zero check is enough here; the drive/KeyVault reject obviously bad keys.
-    unsigned char key[DVDP_DVD_KEY_SIZE];
-    for (int tries = 0; tries < 8; ++tries) {
-        DVDP_STATUS st = XeKeysGenerateRandomKey(key, DVDP_DVD_KEY_SIZE);
-        if (!DVDP_SUCCESS(st))
-            return st;
-        int allZero = 1;
-        for (int i = 0; i < DVDP_DVD_KEY_SIZE; ++i)
-            if (key[i]) { allZero = 0; break; }
-        if (!allZero)
-            break;
-    }
-    return DvdPair_PairWithKey(key, /*alsoWriteKeyVault=*/1);
-}
-
-// Faithful replica of the recovery's DG-16D4S branch (sub_92089088, new-console only).
-// Writes FIXED Microsoft test constants, NOT a per-console key. Provided for parity;
-// for actually pairing a D4S to your own console you normally want the generic BB/30
-// path with your real key instead.
-static DVDP_STATUS Odd_ProvisionDG16D4S(void)
-{
-    void* h = 0;
-    DVDP_STATUS st = OddOpen(&h);
-    if (!DVDP_SUCCESS(st))
-        return st;
-
-    unsigned char cur[DVDP_DVD_KEY_SIZE];
-    // read current drive key (vendor 0x25) into cur
-    ODD_COMMAND rc; memset(&rc, 0, sizeof(rc)); rc.Size = 24; rc.Opcode = 0x25;
-    ODD_RAW_REQUEST rr; memset(&rr, 0, sizeof(rr));
-    rr.RequestSize = 0x0024; rr.Direction = 1; rr.TransferLength = 26;
-    rr.Command = &rc; rr.Signature = 0x55; rr.TransferLength2 = 26;
-    st = OddIoctl(h, &rr);
-    if (!DVDP_SUCCESS(st)) { NtClose(h); return st; }
-    memcpy(cur, rc.Payload, DVDP_DVD_KEY_SIZE);
-
-    if (memcmp(cur, kD4S_BlankMarker, DVDP_DVD_KEY_SIZE) == 0) {
-        // blank/factory drive: write CONST_A then authenticate with CONST_B
-        unsigned char ff[DVDP_DVD_KEY_SIZE]; memset(ff, 0xFF, sizeof(ff));
-        st = OddSendCommand(h, 0xBB, 0x30, 0, ff,            DVDP_DVD_KEY_SIZE, 56);
-        if (DVDP_SUCCESS(st))
-            st = OddSendCommand(h, 0xBB, 0x30, 0, kD4S_KeyConstA, DVDP_DVD_KEY_SIZE, 56);
-        if (DVDP_SUCCESS(st))
-            st = Odd_AuthenticateKey(h, kD4S_AuthConstB);
-        NtClose(h);
-        return st;
-    }
-
-    NtClose(h);
-    // already-keyed drive: recovery only syncs the KeyVault to CONST_A
-    return Dvd_SetConsoleKey(kD4S_KeyConstA);
-}
-
-DVDP_STATUS DvdPair_PairConnectedDriveEx(const unsigned char* key, int alsoWriteKeyVault,
-                                         DVDP_ODD_METHOD method)
+DVDP_STATUS DvdPair_PairConnectedDrive(DVDP_ODD_METHOD method)
 {
     DVD_DRIVE_INFO di;
     DVDP_STATUS st = Odd_DetectDrive(&di);
     if (!DVDP_SUCCESS(st))
         return st;                       // no drive / INQUIRY failed
 
-    // DG-16D5S flash is not writable - the key cannot be set in the drive. Refuse
-    // up front instead of failing obscurely at the BB/30 write.
-    if (di.Family == DVD_FAMILY_LITEON_D5S)
-        return (DVDP_STATUS)0xC00000A3L; // "can't pair this drive"
-
     if (method == DVDP_ODD_AUTO) {
-        // Unrecognized firmware revision: don't guess. Report it so the caller can ask
-        // the user to pick DVDP_ODD_OLD or DVDP_ODD_NEW and re-call. Nothing written yet.
+        // Don't guess for a model that can use either method (checked first, because these
+        // can also have unrecognized firmware) or an unrecognized firmware revision. Report
+        // it so the caller can ask the user and re-call. Nothing written yet.
+        if (di.AskMethod)
+            return DVDP_STATUS_CHOOSE_METHOD;
         if (!di.KnownFirmware)
             return DVDP_STATUS_UNKNOWN_FIRMWARE;
-        // Known firmware: mirror the recovery. A DG-16D4S on a new-generation board uses
-        // the recovery's D4S provisioning flow (fixed test constants); everything else
-        // (and every drive on an older board such as a Falcon) uses the old BB/30 path.
-        if (di.IsDG16D4S && Dvd_IsNewGenerationConsole())
-            return Odd_ProvisionDG16D4S();
         method = DVDP_ODD_OLD;
     }
-    // (An explicit DVDP_ODD_OLD / _NEW overrides all of the above, including for a D4S.)
+    // (An explicit DVDP_ODD_OLD / _NEW overrides all of the above.)
 
-    unsigned char local[DVDP_DVD_KEY_SIZE];
-    if (!key) {                          // default: use the console's existing key
-        st = Dvd_GetConsoleKey(local);
-        if (!DVDP_SUCCESS(st))
-            return st;
-        key = local;
-    } else if (alsoWriteKeyVault) {
-        st = Dvd_SetConsoleKey(key);
-        if (!DVDP_SUCCESS(st))
-            return st;
-    }
+    unsigned char key[DVDP_DVD_KEY_SIZE];
+    st = Dvd_GetConsoleKey(key);
+    if (!DVDP_SUCCESS(st))
+        return st;
     return Odd_SetDriveKeyMethod(key, method);
-}
-
-DVDP_STATUS DvdPair_PairConnectedDrive(const unsigned char* key, int alsoWriteKeyVault)
-{
-    return DvdPair_PairConnectedDriveEx(key, alsoWriteKeyVault, DVDP_ODD_AUTO);
 }
