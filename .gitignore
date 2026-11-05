@@ -1,0 +1,42 @@
+# Build output
+*.o
+*.obj
+*.exe
+*.pe
+*.pdb
+*.xdb
+*.lib
+*.xex
+*.map
+/bin/
+/obj/
+/Debug/
+/Release/
+
+# IDA artifacts (if analysis files ever land here)
+*.i64
+*.idb
+*.til
+*.nam
+*.id0
+*.id1
+*.id2
+
+# Editor
+*.swp
+*~
+.vs/
+
+# Keep the console font source even though *.xpr-like binaries are build-ish
+!font.xpr
+
+# ATG framework comes from the SDK (AtgFramework-installer.bat), except the files we changed
+/atg/*
+!/atg/Common/
+/atg/Common/*
+!/atg/Common/AtgConsole.cpp
+!/atg/Common/AtgConsole.h
+!/atg/Common/AtgResource.cpp
+
+# Keep the vendored XexTool despite *.exe above
+!tools/XexTool.exe
