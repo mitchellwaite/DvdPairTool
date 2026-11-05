@@ -17,6 +17,24 @@
 extern "C" VOID HalReturnToFirmware(DWORD mode);
 #define HalReturnToFirmwareReboot 1
 
+// Kernel version export (same layout and check as UsbdSecPatch).
+struct KRNL_VERSION { WORD Major, Minor, Build, Qfe; };
+extern "C" __declspec(dllimport) KRNL_VERSION XboxKrnlVersion;
+
+// This dword is zero on a devkit kernel (the check UsbdSecPatch uses).
+#define DEVKIT_CHECK_ADDRESS   0x8010D334
+#define MIN_DEVKIT_KERNEL      17489
+
+static void WarnIfUnsupportedKernel()
+{
+    BOOL isDevkit = *(volatile DWORD*)DEVKIT_CHECK_ADDRESS == 0;
+    if (isDevkit && XboxKrnlVersion.Build < MIN_DEVKIT_KERNEL) {
+        dprintf("WARNING: devkit kernel %u is older than %u; this tool may not be supported.\n",
+                XboxKrnlVersion.Build, MIN_DEVKIT_KERNEL);
+        dprintf("--------------------------------------------------------------\n");
+    }
+}
+
 static ATG::GAMEPAD* g_pad;
 
 static const char* FamilyName(DVD_DRIVE_FAMILY f)
@@ -129,8 +147,12 @@ static void ShowDrive()
     dprintf("Drive : %s %s rev %s\n", di.Vendor, di.Product, di.Revision);
     dprintf("Family: %s\n", FamilyName(di.Family));
     dprintf("Firmware: %s\n", di.KnownFirmware ? "known-good" : "UNRECOGNIZED");
-    if (di.AskMethod)
-        dprintf("NOTE: This model can use either pairing method - you'll be asked to choose.\n");
+    if (di.AskMethod) {
+        dprintf("Caution for slim DVD drives:\n");
+        dprintf("- LTU2 drives use the 'old' pairing method\n");
+        dprintf("- pairing may fail if the drive has a locked flash.\n");
+        dprintf("- drive auth may fail after pairing if an fcrt is in use\n");
+    }
 }
 
 VOID __cdecl main()
@@ -138,8 +160,8 @@ VOID __cdecl main()
     MakeConsole("embed:\\font", CONSOLE_COLOR_BLACK, CONSOLE_COLOR_GOLD);
 
     dprintf("Xbox 360 DVD Drive Pairing Tool\n");
-    dprintf("Devkit/testkit or patched-HV retail only.\n");
     dprintf("--------------------------------------------------------------\n");
+    WarnIfUnsupportedKernel();
     ShowDrive();
     dprintf("--------------------------------------------------------------\n");
     dprintf("A = Pair drive to this console (KeyVault key -> drive)\n");
